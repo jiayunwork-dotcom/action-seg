@@ -1,0 +1,15 @@
+{
+  "action_classes": [
+    {"id": 0, "name": "背景", "color": "#808080"},
+    {"id": 1, "name": "站立", "color": "#FF6B6B"},
+    {"id": 2, "name": "行走", "color": "#4ECDC4"},
+    {"id": 3, "name": "坐下", "color": "#45B7D1"},
+    {"id": 4, "name": "起立", "color": "#96CEB4"},
+    {"id": 5, "name": "拿起", "color": "#FFEAA7"},
+    {"id": 6, "name": "放下", "color": "#DDA0DD"},
+    {"id": 7, "name": "打开", "color": "#98D8C8"},
+    {"id": 8, "name": "关闭", "color": "#F7DC6F"},
+    {"id": 9, "name": "倒水", "color": "#BB8FCE"},
+    {"id": 10, "name": "饮水", "color": "#85C1E9"}
+  ]
+}

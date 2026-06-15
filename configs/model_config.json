@@ -1,0 +1,40 @@
+{
+  "models": {
+    "latest": {
+      "feature_extractor": {
+        "slowfast_alpha": 8,
+        "feature_dim": 512
+      },
+      "segmentation": {
+        "num_stages": 4,
+        "num_layers": 4,
+        "num_f_maps": 64,
+        "dilations": [1, 2, 4, 8]
+      }
+    },
+    "v1.0": {
+      "feature_extractor": {
+        "slowfast_alpha": 8,
+        "feature_dim": 512
+      },
+      "segmentation": {
+        "num_stages": 4,
+        "num_layers": 4,
+        "num_f_maps": 64,
+        "dilations": [1, 2, 4, 8]
+      }
+    }
+  },
+  "preprocessing": {
+    "target_fps": 8,
+    "resize_size": [224, 224],
+    "max_video_minutes": 5,
+    "segment_minutes": 2,
+    "overlap_frames": 10
+  },
+  "postprocessing": {
+    "min_duration_sec": 0.5,
+    "merge_gap_sec": 0.3,
+    "nms_iou_threshold": 0.5
+  }
+}
