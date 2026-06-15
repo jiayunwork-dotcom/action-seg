@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Action Segmentation API"
     DEBUG: bool = True
 
-    BASE_DIR: Path = Path(__file__).resolve().parent.parent
+    BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
     STORAGE_DIR: Path = BASE_DIR / "storage"
     UPLOAD_DIR: Path = STORAGE_DIR / "uploads"
     CACHE_DIR: Path = STORAGE_DIR / "cache"
