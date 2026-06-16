@@ -105,23 +105,70 @@ class PostProcessor:
             return []
 
         min_frames = max(1, int(self.min_duration_sec * fps))
-        filtered = []
 
-        for seg in segments:
+        fixed = []
+        for i, seg in enumerate(segments):
             duration_frames = seg.end_frame - seg.start_frame + 1
             if duration_frames >= min_frames:
-                filtered.append(seg)
+                fixed.append(ActionSegment(
+                    start_frame=seg.start_frame,
+                    end_frame=seg.end_frame,
+                    action_id=seg.action_id,
+                    action_name=seg.action_name,
+                    confidence=seg.confidence,
+                    start_time=seg.start_time,
+                    end_time=seg.end_time,
+                ))
             else:
-                if filtered:
-                    prev = filtered[-1]
-                    prev.end_frame = seg.end_frame
-                    prev.end_time = seg.end_time
-                elif len(segments) > 1:
-                    next_seg = segments[1]
-                    next_seg.start_frame = seg.start_frame
-                    next_seg.start_time = seg.start_time
+                prev_dur = (fixed[-1].end_frame - fixed[-1].start_frame + 1) if fixed else 0
+                next_dur = (segments[i + 1].end_frame - segments[i + 1].start_frame + 1) if i + 1 < len(segments) else 0
 
-        return filtered if filtered else segments
+                if prev_dur >= next_dur and fixed:
+                    donor = fixed[-1]
+                elif next_dur > 0 and i + 1 < len(segments):
+                    donor = segments[i + 1]
+                elif fixed:
+                    donor = fixed[-1]
+                else:
+                    fixed.append(ActionSegment(
+                        start_frame=seg.start_frame,
+                        end_frame=seg.end_frame,
+                        action_id=0,
+                        action_name=self.id_to_name.get(0, "背景"),
+                        confidence=seg.confidence,
+                        start_time=seg.start_time,
+                        end_time=seg.end_time,
+                    ))
+                    continue
+
+                fixed.append(ActionSegment(
+                    start_frame=seg.start_frame,
+                    end_frame=seg.end_frame,
+                    action_id=donor.action_id,
+                    action_name=donor.action_name,
+                    confidence=seg.confidence,
+                    start_time=seg.start_time,
+                    end_time=seg.end_time,
+                ))
+
+        merged = [fixed[0]]
+        for seg in fixed[1:]:
+            prev = merged[-1]
+            if seg.action_id == prev.action_id and seg.start_frame <= prev.end_frame + 1:
+                prev = ActionSegment(
+                    start_frame=prev.start_frame,
+                    end_frame=max(prev.end_frame, seg.end_frame),
+                    action_id=prev.action_id,
+                    action_name=prev.action_name,
+                    confidence=prev.confidence,
+                    start_time=prev.start_time,
+                    end_time=max(prev.end_time, seg.end_time),
+                )
+                merged[-1] = prev
+            else:
+                merged.append(seg)
+
+        return merged
 
     def merge_adjacent_same_class(
         self,
@@ -132,17 +179,39 @@ class PostProcessor:
             return segments
 
         max_gap_frames = max(1, int(self.merge_gap_sec * fps))
-        merged = [segments[0]]
+        merged = [ActionSegment(
+            start_frame=segments[0].start_frame,
+            end_frame=segments[0].end_frame,
+            action_id=segments[0].action_id,
+            action_name=segments[0].action_name,
+            confidence=segments[0].confidence,
+            start_time=segments[0].start_time,
+            end_time=segments[0].end_time,
+        )]
 
         for seg in segments[1:]:
             prev = merged[-1]
             if (seg.action_id == prev.action_id and
                 seg.start_frame - prev.end_frame - 1 <= max_gap_frames):
-                prev.end_frame = seg.end_frame
-                prev.end_time = seg.end_time
-                prev.confidence = (prev.confidence + seg.confidence) / 2
+                merged[-1] = ActionSegment(
+                    start_frame=prev.start_frame,
+                    end_frame=seg.end_frame,
+                    action_id=prev.action_id,
+                    action_name=prev.action_name,
+                    confidence=(prev.confidence + seg.confidence) / 2,
+                    start_time=prev.start_time,
+                    end_time=seg.end_time,
+                )
             else:
-                merged.append(seg)
+                merged.append(ActionSegment(
+                    start_frame=seg.start_frame,
+                    end_frame=seg.end_frame,
+                    action_id=seg.action_id,
+                    action_name=seg.action_name,
+                    confidence=seg.confidence,
+                    start_time=seg.start_time,
+                    end_time=seg.end_time,
+                ))
 
         return merged
 

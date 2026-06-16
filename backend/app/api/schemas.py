@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -11,6 +11,8 @@ class VideoUploadResponse(BaseModel):
 
 
 class VideoInfoResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     video_id: str
     filename: str
     duration: float

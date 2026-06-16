@@ -70,9 +70,10 @@ class AnalysisPipeline:
 
             all_segment_features = []
             for i, seg in enumerate(segments):
-                seg_frames_tensor = torch.from_numpy(seg["frames"]).unsqueeze(0)
+                seg_frames = torch.from_numpy(seg["frames"]).unsqueeze(0)
+                seg_frames = seg_frames.permute(0, 2, 1, 3, 4).contiguous()
                 seg_features = feature_extractor.extract(
-                    seg_frames_tensor, batch_size=1, device=device
+                    seg_frames, batch_size=1, device=device
                 )
                 all_segment_features.append((
                     seg_features.squeeze(0).numpy(),
