@@ -569,7 +569,7 @@ async def get_comparison_status(task_id: str):
     for mv, sub in status["sub_tasks"].items():
         sub_tasks.append(CompareSubTaskInfo(
             model_version=mv,
-            task_id=sub.get("task_id", ""),
+            task_id=sub.get("task_id"),
             status=sub["status"],
             progress=sub["progress"],
             error=sub.get("error"),

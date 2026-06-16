@@ -1,0 +1,20 @@
+{
+  "compare_task_id": "74a4c2f0-a5c3-4a36-87c6-8b9994093672",
+  "video_id": "test_video_001",
+  "model_versions": [
+    "latest",
+    "v1.0"
+  ],
+  "agreement_rates": {
+    "latest_vs_v1.0": 0.857
+  },
+  "disagreement_intervals": {
+    "latest_vs_v1.0": []
+  },
+  "metrics_comparison": null,
+  "has_ground_truth": false,
+  "total_frames": 3000,
+  "fps": 30.0,
+  "computed_at": "2026-06-16T13:52:20.292273",
+  "difference_matrix_omitted": true
+}

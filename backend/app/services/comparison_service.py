@@ -19,7 +19,7 @@ class ComparisonService:
     _result_cache: Dict[str, Dict] = {}
     _heatmap_cache: Dict[str, Dict] = {}
     CACHE_TTL_SECONDS = 1800
-    HEATMAP_FRAME_THRESHOLD = 2000
+    HEATMAP_FRAME_THRESHOLD = 5000
     HEATMAP_WINDOW_SIZE = 50
 
     def __new__(cls):

@@ -131,7 +131,7 @@ class CompareCreateRequest(BaseModel):
 
 class CompareSubTaskInfo(BaseModel):
     model_version: str
-    task_id: str
+    task_id: Optional[str] = None
     status: str
     progress: int
     error: Optional[str] = None
