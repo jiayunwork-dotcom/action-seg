@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import tempfile
 from io import StringIO
 from typing import Optional
@@ -745,8 +746,11 @@ with tab4:
         st.markdown("### 📝 创建对比任务")
         model_versions_resp = api_request("GET", "/models/versions")
         available_versions = ["latest"]
+        action_classes_for_filter = []
         if model_versions_resp and model_versions_resp.status_code == 200:
-            available_versions = model_versions_resp.json().get("versions", ["latest"])
+            mv_data = model_versions_resp.json()
+            available_versions = mv_data.get("versions", ["latest"])
+            action_classes_for_filter = mv_data.get("action_classes", [])
 
         selected_versions = st.multiselect(
             "选择模型版本 (2~4个)",
@@ -813,6 +817,43 @@ with tab4:
                     if status_data["overall_status"] == "partial":
                         st.warning(f"⚠️ 部分模型失败: {', '.join(status_data.get('failed_models', []))}")
 
+                    st.markdown("---")
+                    st.markdown("### ➕ 追加模型版本")
+                    current_versions = status_data.get("model_versions", [])
+                    append_candidates = [v for v in available_versions if v not in current_versions]
+                    if append_candidates:
+                        append_selected = st.multiselect(
+                            "选择要追加的模型版本",
+                            append_candidates,
+                            key="append_model_versions",
+                        )
+                        if append_selected:
+                            append_ok = True
+                            for mv in append_selected:
+                                check_resp = api_request(
+                                    "GET",
+                                    f"/videos/{video_id}/results",
+                                    params={"model_version": mv},
+                                )
+                                if check_resp is None or check_resp.status_code != 200:
+                                    st.warning(f"模型版本 '{mv}' 尚无分析结果，请先分析")
+                                    append_ok = False
+                            if append_ok and st.button("➕ 追加模型版本", key="append_btn"):
+                                append_resp = api_request(
+                                    "POST",
+                                    f"/compare/{compare_task_id}/append",
+                                    json={"model_versions": append_selected},
+                                )
+                                if append_resp is None:
+                                    st.error("❌ API连接失败")
+                                elif append_resp.status_code != 200:
+                                    st.error(f"❌ 追加失败: {append_resp.text}")
+                                else:
+                                    st.success("✅ 模型版本已追加，对比结果已重算!")
+                                    st.rerun()
+                    else:
+                        st.info("当前对比任务已包含所有可用模型版本")
+
                     results_resp = api_request("GET", f"/compare/{compare_task_id}/results")
                     if results_resp and results_resp.status_code == 200:
                         comp_results = results_resp.json()
@@ -839,7 +880,31 @@ with tab4:
 
                         st.markdown("---")
                         st.markdown("### 🔥 分歧热力图")
-                        heatmap_resp = api_request("GET", f"/compare/{compare_task_id}/heatmap")
+
+                        heatmap_filter_col1, heatmap_filter_col2 = st.columns([1, 3])
+                        with heatmap_filter_col1:
+                            filter_action_options = [("全部类别", None)] + [
+                                (ac["name"], ac["id"]) for ac in action_classes_for_filter
+                            ]
+                            selected_action_name = st.selectbox(
+                                "按动作类别过滤",
+                                [opt[0] for opt in filter_action_options],
+                                key="heatmap_action_filter",
+                            )
+                            selected_action_id = next(
+                                (opt[1] for opt in filter_action_options if opt[0] == selected_action_name),
+                                None,
+                            )
+
+                        heatmap_params = {}
+                        if selected_action_id is not None:
+                            heatmap_params["action_class"] = selected_action_id
+
+                        heatmap_resp = api_request(
+                            "GET",
+                            f"/compare/{compare_task_id}/heatmap",
+                            params=heatmap_params,
+                        )
                         if heatmap_resp and heatmap_resp.status_code == 200:
                             heatmap_data = heatmap_resp.json()
 
@@ -851,29 +916,57 @@ with tab4:
                                     continue
                                 times = [(p["time_start"] + p["time_end"]) / 2 for p in points]
                                 rates_h = [p["disagreement_rate"] for p in points]
-                                fig_heat.add_trace(go.Bar(
-                                    x=times,
-                                    y=[pair_key] * len(times),
-                                    orientation="h",
-                                    marker_color=rates_h,
-                                    marker_colorscale="Reds",
-                                    marker_cmin=0,
-                                    marker_cmax=1,
-                                    name=pair_key,
-                                    hovertext=[
-                                        f"帧 {p['frame_start']}-{p['frame_end']}<br>"
-                                        f"不一致率: {p['disagreement_rate']:.2%}"
-                                        for p in points
-                                    ],
-                                    hoverinfo="text",
-                                ))
+                                colors_h = []
+                                for p in points:
+                                    if p.get("filtered_out"):
+                                        colors_h.append("rgba(200,200,200,0.3)")
+                                    else:
+                                        colors_h.append(p["disagreement_rate"])
+                                has_filtered = any(p.get("filtered_out") for p in points)
 
+                                if has_filtered:
+                                    fig_heat.add_trace(go.Bar(
+                                        x=times,
+                                        y=[pair_key] * len(times),
+                                        orientation="h",
+                                        marker_color=colors_h,
+                                        marker_colorscale="Reds",
+                                        marker_cmin=0,
+                                        marker_cmax=1,
+                                        name=pair_key,
+                                        hovertext=[
+                                            f"帧 {p['frame_start']}-{p['frame_end']}<br>"
+                                            f"不一致率: {p['disagreement_rate']:.2%}"
+                                            + ("<br>(非选定类别帧，已灰显)" if p.get("filtered_out") else "")
+                                            for p in points
+                                        ],
+                                        hoverinfo="text",
+                                    ))
+                                else:
+                                    fig_heat.add_trace(go.Bar(
+                                        x=times,
+                                        y=[pair_key] * len(times),
+                                        orientation="h",
+                                        marker_color=rates_h,
+                                        marker_colorscale="Reds",
+                                        marker_cmin=0,
+                                        marker_cmax=1,
+                                        name=pair_key,
+                                        hovertext=[
+                                            f"帧 {p['frame_start']}-{p['frame_end']}<br>"
+                                            f"不一致率: {p['disagreement_rate']:.2%}"
+                                            for p in points
+                                        ],
+                                        hoverinfo="text",
+                                    ))
+
+                            filter_title = f" (过滤: {selected_action_name})" if selected_action_id is not None else ""
                             fig_heat.update_layout(
                                 barmode="stack",
                                 height=200 + 80 * len(pair_keys),
                                 xaxis_title="时间 (秒)",
                                 yaxis_title="模型对",
-                                title="分歧热力图 (颜色越深=不一致越高)",
+                                title=f"分歧热力图{filter_title} (颜色越深=不一致越高)",
                             )
                             st.plotly_chart(fig_heat, use_container_width=True)
 
@@ -890,13 +983,15 @@ with tab4:
                                     "起始时间(s)": f"{iv['start_time']:.2f}",
                                     "结束时间(s)": f"{iv['end_time']:.2f}",
                                     "持续帧数": iv["length_frames"],
+                                    "备注": iv.get("note", ""),
+                                    "已确认": "✅" if iv.get("confirmed") else "",
                                 })
 
                         if all_intervals:
                             iv_df = pd.DataFrame(all_intervals)
                             st.dataframe(iv_df, use_container_width=True, hide_index=True)
 
-                            st.markdown("#### 🔍 分歧区间详情")
+                            st.markdown("#### 🔍 分歧区间详情与标注")
                             selected_interval_idx = st.selectbox(
                                 "选择分歧区间查看详情",
                                 range(len(all_intervals)),
@@ -913,6 +1008,42 @@ with tab4:
                                 pair_key = sel_iv["模型对"]
                                 start_frame = sel_iv["起始帧"]
                                 end_frame = sel_iv["结束帧"]
+
+                                col_anno1, col_anno2 = st.columns([2, 1])
+                                with col_anno1:
+                                    note_input = st.text_input(
+                                        "📝 添加备注",
+                                        value=sel_iv.get("备注", ""),
+                                        placeholder="例如: 此处是转场导致的误差可忽略",
+                                        key=f"interval_note_{selected_interval_idx}",
+                                    )
+                                with col_anno2:
+                                    confirmed_check = st.checkbox(
+                                        "✅ 标记为已确认",
+                                        value=bool(sel_iv.get("已确认")),
+                                        key=f"interval_confirmed_{selected_interval_idx}",
+                                    )
+
+                                if st.button("💾 保存标注", key=f"save_annotation_{selected_interval_idx}"):
+                                    anno_resp = api_request(
+                                        "PATCH",
+                                        f"/compare/{compare_task_id}/intervals/annotate",
+                                        params={
+                                            "pair_key": pair_key,
+                                            "start_frame": start_frame,
+                                            "end_frame": end_frame,
+                                        },
+                                        json={
+                                            "note": note_input if note_input else None,
+                                            "confirmed": confirmed_check if confirmed_check else None,
+                                        },
+                                    )
+                                    if anno_resp and anno_resp.status_code == 200:
+                                        st.success("✅ 标注已保存!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ 标注保存失败: {anno_resp.text if anno_resp else 'API连接失败'}")
+
                                 mv_pair = pair_key.replace("_vs_", ",")
                                 labels_resp = api_request(
                                     "GET",
@@ -1015,6 +1146,28 @@ with tab4:
                                             st.error(f"❌ GT评估失败: {eval_resp.text if eval_resp else 'API连接失败'}")
                                     except Exception as e:
                                         st.error(f"❌ 评估出错: {str(e)}")
+
+                        st.markdown("---")
+                        st.markdown("### 📤 导出对比报告")
+                        if st.button("📄 生成并下载对比报告", key="export_compare_btn"):
+                            export_resp = api_request(
+                                "POST",
+                                f"/compare/{compare_task_id}/export",
+                            )
+                            if export_resp and export_resp.status_code == 200:
+                                report_data = export_resp.json()
+                                report_json = json.dumps(report_data, ensure_ascii=False, indent=2)
+                                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                                st.success("✅ 报告生成成功!")
+                                st.download_button(
+                                    label="💾 下载报告 (JSON)",
+                                    data=report_json.encode("utf-8"),
+                                    file_name=f"compare_report_{compare_task_id[:8]}_{timestamp}.json",
+                                    mime="application/json",
+                                    key="download_compare_report",
+                                )
+                            else:
+                                st.error(f"❌ 导出失败: {export_resp.text if export_resp else 'API连接失败'}")
 
                 elif status_data["overall_status"] in ("pending", "running"):
                     auto_refresh = st.checkbox("自动刷新进度", value=True, key="compare_auto_refresh")

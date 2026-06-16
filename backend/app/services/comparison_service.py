@@ -635,6 +635,351 @@ class ComparisonService:
             result[mv] = labels[start_frame:end_frame + 1]
         return result if result else None
 
+    def append_model_versions(
+        self, compare_task_id: str, new_model_versions: List[str]
+    ) -> Optional[Dict]:
+        task = self.get_comparison_status(compare_task_id)
+        if task is None:
+            raise ValueError(f"Comparison task {compare_task_id} not found")
+
+        if task["overall_status"] not in ("completed", "partial"):
+            raise ValueError("Can only append to completed or partial comparison tasks")
+
+        video_id = task["video_id"]
+        existing_versions = task["model_versions"]
+
+        truly_new = [mv for mv in new_model_versions if mv not in existing_versions]
+        if not truly_new:
+            raise ValueError("All specified model versions already exist in this comparison task")
+
+        total_after = len(existing_versions) + len(truly_new)
+        if total_after > 6:
+            raise ValueError(
+                f"Total model versions would be {total_after}, maximum is 6"
+            )
+
+        for mv in truly_new:
+            results = self.storage.load_results(video_id, mv)
+            if results is None:
+                raise ValueError(
+                    f"No analysis results found for video {video_id} with model {mv}"
+                )
+
+        for mv in truly_new:
+            task["model_versions"].append(mv)
+            task["sub_tasks"][mv] = {
+                "model_version": mv,
+                "task_id": None,
+                "status": "completed",
+                "progress": 100,
+                "error": None,
+            }
+
+        task["all_cached"] = all(
+            s["status"] == "completed" for s in task["sub_tasks"].values()
+        )
+        self._save_task_to_disk(compare_task_id)
+
+        self._incremental_compute(compare_task_id, existing_versions, truly_new)
+
+        return task
+
+    def _incremental_compute(
+        self,
+        compare_task_id: str,
+        old_versions: List[str],
+        new_versions: List[str],
+    ):
+        task = self.get_comparison_status(compare_task_id)
+        if task is None:
+            return
+
+        video_id = task["video_id"]
+        all_versions = task["model_versions"]
+
+        successful_models = [
+            mv for mv in all_versions
+            if task["sub_tasks"][mv]["status"] == "completed"
+        ]
+        if len(successful_models) < 2:
+            return
+
+        model_labels: Dict[str, np.ndarray] = {}
+        video_info = None
+        for mv in successful_models:
+            results = self.storage.load_results(video_id, mv)
+            if results is None:
+                continue
+            labels = np.array(results["frame_predictions"]["labels"], dtype=np.int64)
+            model_labels[mv] = labels
+            if video_info is None:
+                video_info = results["video_info"]
+
+        if len(model_labels) < 2 or video_info is None:
+            return
+
+        min_len = min(len(v) for v in model_labels.values())
+        for mv in model_labels:
+            model_labels[mv] = model_labels[mv][:min_len]
+
+        existing_results = self._get_cached_results(compare_task_id)
+        if existing_results is None:
+            existing_results = self._load_results_from_disk(compare_task_id)
+
+        existing_agreement_rates = {}
+        existing_disagreement_intervals = {}
+        existing_diff_matrix = None
+
+        if existing_results is not None:
+            existing_agreement_rates = existing_results.get("agreement_rates", {})
+            existing_disagreement_intervals = existing_results.get("disagreement_intervals", {})
+            existing_diff_matrix = existing_results.get("difference_matrix")
+
+        old_pairs = list(combinations(old_versions, 2))
+        old_pair_keys = {f"{a}_vs_{b}" for a, b in old_pairs}
+
+        new_pairs = []
+        for nv in new_versions:
+            for ov in old_versions:
+                pair = tuple(sorted([nv, ov], key=lambda x: all_versions.index(x) if x in all_versions else 999))
+                new_pairs.append(pair)
+        for pair in combinations(new_versions, 2):
+            new_pairs.append(pair)
+
+        new_pair_keys = [f"{a}_vs_{b}" for a, b in new_pairs]
+
+        diff_matrix, new_agreement_rates = self._compute_frame_differences_fast(
+            model_labels, all_versions, min_len
+        )
+
+        for pk, rate in new_agreement_rates.items():
+            if pk not in old_pair_keys:
+                existing_agreement_rates[pk] = rate
+
+        new_disagreement_intervals = self._compute_disagreement_intervals_fast(
+            model_labels, new_versions + [ov for ov in old_versions if ov not in old_versions],
+            min_len, video_info["target_fps"],
+        )
+        for pk, intervals in new_disagreement_intervals.items():
+            if pk not in old_pair_keys:
+                existing_disagreement_intervals[pk] = intervals
+
+        results = {
+            "compare_task_id": compare_task_id,
+            "video_id": video_id,
+            "model_versions": successful_models,
+            "difference_matrix": diff_matrix,
+            "agreement_rates": existing_agreement_rates,
+            "disagreement_intervals": existing_disagreement_intervals,
+            "metrics_comparison": None,
+            "has_ground_truth": False,
+            "total_frames": min_len,
+            "fps": video_info["target_fps"],
+            "computed_at": datetime.utcnow().isoformat(),
+        }
+
+        if existing_results and existing_results.get("has_ground_truth"):
+            results["has_ground_truth"] = True
+            results["metrics_comparison"] = existing_results.get("metrics_comparison")
+
+        self._result_cache[compare_task_id] = {
+            "results": results,
+            "cached_at": time.time(),
+        }
+        self._save_results_to_disk(compare_task_id, results)
+
+        self._precompute_heatmap(compare_task_id, results)
+
+    def annotate_disagreement_interval(
+        self,
+        compare_task_id: str,
+        pair_key: str,
+        start_frame: int,
+        end_frame: int,
+        note: Optional[str] = None,
+        confirmed: Optional[bool] = None,
+    ) -> Optional[Dict]:
+        results = self._get_cached_results(compare_task_id)
+        if results is None:
+            results = self._load_results_from_disk(compare_task_id)
+        if results is None:
+            return None
+
+        disagreement_intervals = results.get("disagreement_intervals", {})
+        if pair_key not in disagreement_intervals:
+            return None
+
+        updated_interval = None
+        for iv in disagreement_intervals[pair_key]:
+            if iv["start_frame"] == start_frame and iv["end_frame"] == end_frame:
+                if note is not None:
+                    iv["note"] = note
+                if confirmed is not None:
+                    iv["confirmed"] = confirmed
+                updated_interval = iv
+                break
+
+        if updated_interval is None:
+            return None
+
+        self._result_cache[compare_task_id] = {
+            "results": results,
+            "cached_at": time.time(),
+        }
+        self._save_results_to_disk(compare_task_id, results)
+
+        return results
+
+    def export_comparison_report(self, compare_task_id: str) -> Optional[Dict]:
+        task = self.get_comparison_status(compare_task_id)
+        if task is None:
+            return None
+
+        results = self._get_cached_results(compare_task_id)
+        if results is None:
+            results = self._load_results_from_disk(compare_task_id)
+        if results is None:
+            return None
+
+        video_id = task["video_id"]
+        video_info = self.storage.load_video_info(video_id)
+        if video_info is None:
+            video_info = {}
+
+        heatmap = self._load_heatmap_from_disk(compare_task_id)
+        heatmap_summary = {}
+        if heatmap and heatmap.get("heatmap_data"):
+            for pair_key, points in heatmap["heatmap_data"].items():
+                rates = [p["r"] for p in points]
+                heatmap_summary[pair_key] = {
+                    "max_disagreement_rate": round(max(rates), 4) if rates else 0.0,
+                    "avg_disagreement_rate": round(sum(rates) / len(rates), 4) if rates else 0.0,
+                    "num_windows": len(points),
+                }
+
+        disagreement_summary = []
+        for pair_key, intervals in results.get("disagreement_intervals", {}).items():
+            for iv in intervals:
+                entry = {
+                    "pair_key": pair_key,
+                    "start_frame": iv["start_frame"],
+                    "end_frame": iv["end_frame"],
+                    "start_time": iv["start_time"],
+                    "end_time": iv["end_time"],
+                    "length_frames": iv["length_frames"],
+                }
+                if iv.get("note"):
+                    entry["note"] = iv["note"]
+                if iv.get("confirmed") is not None:
+                    entry["confirmed"] = iv["confirmed"]
+                disagreement_summary.append(entry)
+
+        report = {
+            "report_generated_at": datetime.utcnow().isoformat(),
+            "compare_task_id": compare_task_id,
+            "video_info": {
+                "video_id": video_id,
+                "filename": video_info.get("filename", ""),
+                "duration": video_info.get("duration", 0),
+                "fps": video_info.get("target_fps", 0),
+                "resolution": f"{video_info.get('width', 0)}x{video_info.get('height', 0)}",
+                "total_frames": video_info.get("total_frames", 0),
+            },
+            "model_versions": results["model_versions"],
+            "agreement_rates": results["agreement_rates"],
+            "disagreement_intervals_summary": disagreement_summary,
+            "heatmap_summary": heatmap_summary,
+            "total_frames": results["total_frames"],
+            "has_ground_truth": results.get("has_ground_truth", False),
+        }
+
+        if results.get("has_ground_truth") and results.get("metrics_comparison"):
+            report["metrics_comparison"] = results["metrics_comparison"]
+
+        return report
+
+    def compute_heatmap_data_filtered(
+        self, compare_task_id: str, action_class_id: Optional[int] = None
+    ) -> Optional[Dict]:
+        heatmap = self.compute_heatmap_data(compare_task_id)
+        if heatmap is None or action_class_id is None:
+            return heatmap
+
+        task = self.get_comparison_status(compare_task_id)
+        if task is None:
+            return heatmap
+
+        video_id = task["video_id"]
+        total_frames = 0
+        results_data = None
+        for mv in heatmap.get("model_pairs", []):
+            parts = mv.split("_vs_")
+            mv_name = parts[0]
+            mv_results = self.storage.load_results(video_id, mv_name)
+            if mv_results is not None:
+                results_data = mv_results
+                total_frames = len(mv_results["frame_predictions"]["labels"])
+                break
+
+        if results_data is None or total_frames == 0:
+            return heatmap
+
+        labels = np.array(results_data["frame_predictions"]["labels"][:total_frames], dtype=np.int64)
+        action_mask = labels == action_class_id
+
+        filtered_heatmap_data: Dict[str, List[Dict]] = {}
+        for pair_key, points in heatmap["heatmap_data"].items():
+            filtered_points = []
+            for p in points:
+                f_start = p["s"] if isinstance(p, dict) and "s" in p else p.frame_start
+                f_end = p["e"] if isinstance(p, dict) and "e" in p else p.frame_end
+
+                if isinstance(p, dict):
+                    f_start = p["s"]
+                    f_end = p["e"]
+                else:
+                    f_start = p.frame_start
+                    f_end = p.frame_end
+
+                if f_end >= total_frames:
+                    f_end_safe = total_frames - 1
+                else:
+                    f_end_safe = f_end
+                if f_start >= total_frames:
+                    continue
+
+                window_mask = action_mask[f_start:f_end_safe + 1]
+                overlap = np.any(window_mask)
+
+                if isinstance(p, dict):
+                    new_point = dict(p)
+                else:
+                    new_point = {
+                        "s": p.frame_start,
+                        "e": p.frame_end,
+                        "ts": p.time_start,
+                        "te": p.time_end,
+                        "r": p.disagreement_rate,
+                    }
+
+                if not overlap:
+                    new_point["filtered_out"] = True
+                    new_point["r"] = 0.0
+
+                filtered_points.append(new_point)
+
+            filtered_heatmap_data[pair_key] = filtered_points
+
+        return {
+            "compare_task_id": heatmap["compare_task_id"],
+            "video_id": heatmap["video_id"],
+            "model_pairs": heatmap["model_pairs"],
+            "is_aggregated": heatmap["is_aggregated"],
+            "window_size": heatmap.get("window_size"),
+            "heatmap_data": filtered_heatmap_data,
+            "action_class_filter": action_class_id,
+        }
+
     def list_comparisons_for_video(self, video_id: str) -> List[Dict]:
         self._refresh_tasks_for_video(video_id)
         return [

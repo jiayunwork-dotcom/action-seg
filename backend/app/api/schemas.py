@@ -154,6 +154,8 @@ class DisagreementInterval(BaseModel):
     start_time: float
     end_time: float
     length_frames: int
+    note: Optional[str] = None
+    confirmed: Optional[bool] = None
 
 
 class CompareResultsResponse(BaseModel):
@@ -175,6 +177,7 @@ class HeatmapDataPoint(BaseModel):
     time_start: float
     time_end: float
     disagreement_rate: float
+    filtered_out: Optional[bool] = None
 
 
 class HeatmapResponse(BaseModel):
@@ -184,3 +187,26 @@ class HeatmapResponse(BaseModel):
     is_aggregated: bool
     window_size: Optional[int] = None
     heatmap_data: Dict[str, List[HeatmapDataPoint]]
+    action_class_filter: Optional[int] = None
+
+
+class CompareAppendRequest(BaseModel):
+    model_versions: List[str] = Field(..., min_length=1, max_length=4)
+
+
+class IntervalAnnotationRequest(BaseModel):
+    note: Optional[str] = None
+    confirmed: Optional[bool] = None
+
+
+class CompareExportResponse(BaseModel):
+    report_generated_at: str
+    compare_task_id: str
+    video_info: Dict[str, Any]
+    model_versions: List[str]
+    agreement_rates: Dict[str, float]
+    disagreement_intervals_summary: List[Dict[str, Any]]
+    heatmap_summary: Dict[str, Any]
+    total_frames: int
+    has_ground_truth: bool = False
+    metrics_comparison: Optional[Dict[str, Dict[str, float]]] = None

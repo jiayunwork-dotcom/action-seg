@@ -30,6 +30,9 @@ from app.api.schemas import (
     DisagreementInterval,
     HeatmapDataPoint,
     HeatmapResponse,
+    CompareAppendRequest,
+    IntervalAnnotationRequest,
+    CompareExportResponse,
 )
 from app.services.segment_editor import SegmentEditor
 from app.services.export_service import ExportService
@@ -617,8 +620,13 @@ async def get_comparison_results(task_id: str):
 
 
 @router.get("/compare/{task_id}/heatmap")
-async def get_comparison_heatmap(task_id: str):
-    heatmap = comparison_service.compute_heatmap_data(task_id)
+async def get_comparison_heatmap(
+    task_id: str,
+    action_class: Optional[int] = Query(None, description="Filter by action class ID"),
+):
+    heatmap = comparison_service.compute_heatmap_data_filtered(
+        task_id, action_class_id=action_class
+    )
     if heatmap is None:
         raise HTTPException(
             status_code=404,
@@ -629,13 +637,17 @@ async def get_comparison_heatmap(task_id: str):
     for pair_key, points in heatmap["heatmap_data"].items():
         converted = []
         for p in points:
-            converted.append(HeatmapDataPoint(
-                frame_start=p["s"],
-                frame_end=p["e"],
-                time_start=p["ts"],
-                time_end=p["te"],
-                disagreement_rate=p["r"],
-            ))
+            if isinstance(p, dict):
+                converted.append(HeatmapDataPoint(
+                    frame_start=p["s"],
+                    frame_end=p["e"],
+                    time_start=p["ts"],
+                    time_end=p["te"],
+                    disagreement_rate=p["r"],
+                    filtered_out=p.get("filtered_out"),
+                ))
+            else:
+                converted.append(p)
         heatmap_data[pair_key] = converted
 
     return HeatmapResponse(
@@ -645,6 +657,7 @@ async def get_comparison_heatmap(task_id: str):
         is_aggregated=heatmap["is_aggregated"],
         window_size=heatmap.get("window_size"),
         heatmap_data=heatmap_data,
+        action_class_filter=heatmap.get("action_class_filter"),
     )
 
 
@@ -716,3 +729,79 @@ async def get_frame_labels(
         "end_frame": end_frame,
         "frame_labels": labels,
     }
+
+
+@router.post("/compare/{task_id}/append")
+async def append_model_versions(task_id: str, request: CompareAppendRequest):
+    try:
+        task = comparison_service.append_model_versions(
+            task_id, request.model_versions
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "compare_task_id": task["compare_task_id"],
+        "video_id": task["video_id"],
+        "model_versions": task["model_versions"],
+        "status": task["overall_status"],
+        "message": "Model versions appended successfully, comparison results recalculated",
+    }
+
+
+@router.patch("/compare/{task_id}/intervals/annotate")
+async def annotate_interval(
+    task_id: str,
+    pair_key: str = Query(...),
+    start_frame: int = Query(...),
+    end_frame: int = Query(...),
+    request: IntervalAnnotationRequest = None,
+):
+    status = comparison_service.get_comparison_status(task_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Comparison task not found")
+
+    results = comparison_service.annotate_disagreement_interval(
+        task_id,
+        pair_key,
+        start_frame,
+        end_frame,
+        note=request.note if request else None,
+        confirmed=request.confirmed if request else None,
+    )
+    if results is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Disagreement interval not found for the given pair_key and frame range",
+        )
+
+    disagreement_intervals = {}
+    for pk, intervals in results["disagreement_intervals"].items():
+        disagreement_intervals[pk] = [
+            DisagreementInterval(**iv) for iv in intervals
+        ]
+
+    return CompareResultsResponse(
+        compare_task_id=results["compare_task_id"],
+        video_id=results["video_id"],
+        model_versions=results["model_versions"],
+        difference_matrix=results["difference_matrix"],
+        agreement_rates=results["agreement_rates"],
+        disagreement_intervals=disagreement_intervals,
+        metrics_comparison=results.get("metrics_comparison"),
+        has_ground_truth=results.get("has_ground_truth", False),
+        total_frames=results["total_frames"],
+        computed_at=results["computed_at"],
+    )
+
+
+@router.post("/compare/{task_id}/export", response_model=CompareExportResponse)
+async def export_comparison_report(task_id: str):
+    report = comparison_service.export_comparison_report(task_id)
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Comparison report not available. Task may not be completed yet.",
+        )
+
+    return CompareExportResponse(**report)
