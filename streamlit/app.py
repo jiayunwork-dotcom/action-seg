@@ -176,7 +176,7 @@ if "analysis_error" not in st.session_state:
 if "analysis_status" not in st.session_state:
     st.session_state["analysis_status"] = "idle"
 
-tab1, tab2, tab3 = st.tabs(["📤 上传与分析", "📊 结果展示", "📈 评估对比"])
+tab1, tab2, tab3, tab4 = st.tabs(["📤 上传与分析", "📊 结果展示", "📈 评估对比", "🔬 模型对比"])
 
 with tab1:
     col1, col2 = st.columns([2, 1])
@@ -733,3 +733,295 @@ with tab3:
                     st.rerun()
     else:
         st.info("请先上传分析视频，并提供Ground Truth标注CSV文件进行评估")
+
+with tab4:
+    st.subheader("🔬 模型对比评测")
+
+    if "current_video_id" not in st.session_state:
+        st.warning("请先在'上传与分析'标签页上传并分析视频")
+    else:
+        video_id = st.session_state["current_video_id"]
+
+        st.markdown("### 📝 创建对比任务")
+        model_versions_resp = api_request("GET", "/models/versions")
+        available_versions = ["latest"]
+        if model_versions_resp and model_versions_resp.status_code == 200:
+            available_versions = model_versions_resp.json().get("versions", ["latest"])
+
+        selected_versions = st.multiselect(
+            "选择模型版本 (2~4个)",
+            available_versions,
+            default=available_versions[:2] if len(available_versions) >= 2 else available_versions,
+            max_selections=4,
+            key="compare_model_versions",
+        )
+
+        if len(selected_versions) < 2:
+            st.info("请至少选择2个模型版本进行对比")
+        else:
+            can_create = True
+            for mv in selected_versions:
+                check_resp = api_request(
+                    "GET",
+                    f"/videos/{video_id}/results",
+                    params={"model_version": mv},
+                )
+                if check_resp is None or check_resp.status_code != 200:
+                    st.warning(f"模型版本 '{mv}' 尚无分析结果，请先分析")
+                    can_create = False
+
+            if can_create and st.button("🚀 提交对比任务", type="primary", key="create_compare_btn"):
+                create_resp = api_request(
+                    "POST",
+                    "/compare/create",
+                    json={"video_id": video_id, "model_versions": selected_versions},
+                )
+                if create_resp is None:
+                    st.error("❌ API连接失败")
+                elif create_resp.status_code != 200:
+                    st.error(f"❌ 创建失败: {create_resp.text}")
+                else:
+                    compare_data = create_resp.json()
+                    st.session_state["compare_task_id"] = compare_data["compare_task_id"]
+                    st.success(f"✅ 对比任务已创建! ID: {compare_data['compare_task_id']}")
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📊 对比进度与结果")
+
+        compare_task_id = st.session_state.get("compare_task_id")
+        if compare_task_id:
+            status_resp = api_request("GET", f"/compare/{compare_task_id}/status")
+            if status_resp and status_resp.status_code == 200:
+                status_data = status_resp.json()
+
+                st.info(f"对比任务ID: {compare_task_id} | 状态: {status_data['overall_status']}")
+
+                for sub in status_data["sub_tasks"]:
+                    prog = max(0, min(100, sub["progress"]))
+                    label = f"{sub['model_version']}"
+                    if sub["status"] == "completed":
+                        st.progress(1.0, text=f"✅ {label} - 完成")
+                    elif sub["status"] == "failed":
+                        st.progress(0.0, text=f"❌ {label} - 失败: {sub.get('error', '未知错误')}")
+                    elif sub["status"] == "running":
+                        st.progress(prog / 100.0, text=f"🔄 {label} - {prog}%")
+                    else:
+                        st.progress(prog / 100.0, text=f"⏳ {label} - 等待中")
+
+                if status_data["overall_status"] in ("completed", "partial"):
+                    if status_data["overall_status"] == "partial":
+                        st.warning(f"⚠️ 部分模型失败: {', '.join(status_data.get('failed_models', []))}")
+
+                    results_resp = api_request("GET", f"/compare/{compare_task_id}/results")
+                    if results_resp and results_resp.status_code == 200:
+                        comp_results = results_resp.json()
+
+                        st.markdown("---")
+                        st.markdown("### 📈 一致率统计")
+                        rates = comp_results["agreement_rates"]
+                        rate_names = list(rates.keys())
+                        rate_values = list(rates.values())
+                        fig_rates = go.Figure([go.Bar(
+                            x=rate_names,
+                            y=rate_values,
+                            marker_color="#2ca02c",
+                            text=[f"{v:.2%}" for v in rate_values],
+                            textposition="auto",
+                        )])
+                        fig_rates.update_layout(
+                            yaxis_title="帧级一致率",
+                            yaxis_range=[0, 1],
+                            height=350,
+                            title="模型对间帧级一致率",
+                        )
+                        st.plotly_chart(fig_rates, use_container_width=True)
+
+                        st.markdown("---")
+                        st.markdown("### 🔥 分歧热力图")
+                        heatmap_resp = api_request("GET", f"/compare/{compare_task_id}/heatmap")
+                        if heatmap_resp and heatmap_resp.status_code == 200:
+                            heatmap_data = heatmap_resp.json()
+
+                            fig_heat = go.Figure()
+                            pair_keys = heatmap_data["model_pairs"]
+                            for pair_idx, pair_key in enumerate(pair_keys):
+                                points = heatmap_data["heatmap_data"].get(pair_key, [])
+                                if not points:
+                                    continue
+                                times = [(p["time_start"] + p["time_end"]) / 2 for p in points]
+                                rates_h = [p["disagreement_rate"] for p in points]
+                                fig_heat.add_trace(go.Bar(
+                                    x=times,
+                                    y=[pair_key] * len(times),
+                                    orientation="h",
+                                    marker_color=rates_h,
+                                    marker_colorscale="Reds",
+                                    marker_cmin=0,
+                                    marker_cmax=1,
+                                    name=pair_key,
+                                    hovertext=[
+                                        f"帧 {p['frame_start']}-{p['frame_end']}<br>"
+                                        f"不一致率: {p['disagreement_rate']:.2%}"
+                                        for p in points
+                                    ],
+                                    hoverinfo="text",
+                                ))
+
+                            fig_heat.update_layout(
+                                barmode="stack",
+                                height=200 + 80 * len(pair_keys),
+                                xaxis_title="时间 (秒)",
+                                yaxis_title="模型对",
+                                title="分歧热力图 (颜色越深=不一致越高)",
+                            )
+                            st.plotly_chart(fig_heat, use_container_width=True)
+
+                        st.markdown("---")
+                        st.markdown("### 📋 分歧区间列表")
+                        disagreement_intervals = comp_results.get("disagreement_intervals", {})
+                        all_intervals = []
+                        for pair_key, intervals in disagreement_intervals.items():
+                            for iv in intervals:
+                                all_intervals.append({
+                                    "模型对": pair_key,
+                                    "起始帧": iv["start_frame"],
+                                    "结束帧": iv["end_frame"],
+                                    "起始时间(s)": f"{iv['start_time']:.2f}",
+                                    "结束时间(s)": f"{iv['end_time']:.2f}",
+                                    "持续帧数": iv["length_frames"],
+                                })
+
+                        if all_intervals:
+                            iv_df = pd.DataFrame(all_intervals)
+                            st.dataframe(iv_df, use_container_width=True, hide_index=True)
+
+                            st.markdown("#### 🔍 分歧区间详情")
+                            selected_interval_idx = st.selectbox(
+                                "选择分歧区间查看详情",
+                                range(len(all_intervals)),
+                                format_func=lambda i: (
+                                    f"{all_intervals[i]['模型对']} | "
+                                    f"帧{all_intervals[i]['起始帧']}-{all_intervals[i]['结束帧']} | "
+                                    f"{all_intervals[i]['持续帧数']}帧"
+                                ),
+                                key="interval_detail_select",
+                            )
+
+                            if selected_interval_idx is not None:
+                                sel_iv = all_intervals[selected_interval_idx]
+                                pair_key = sel_iv["模型对"]
+                                start_frame = sel_iv["起始帧"]
+                                end_frame = sel_iv["结束帧"]
+                                mv_pair = pair_key.replace("_vs_", ",")
+                                labels_resp = api_request(
+                                    "GET",
+                                    f"/compare/{compare_task_id}/frame-labels",
+                                    params={
+                                        "start_frame": start_frame,
+                                        "end_frame": end_frame,
+                                        "model_versions": mv_pair,
+                                    },
+                                )
+                                if labels_resp and labels_resp.status_code == 200:
+                                    labels_data = labels_resp.json()
+                                    frame_labels = labels_data.get("frame_labels", {})
+                                    if frame_labels:
+                                        detail_rows = []
+                                        for mv, labels in frame_labels.items():
+                                            for f_offset, label in enumerate(labels):
+                                                detail_rows.append({
+                                                    "帧号": start_frame + f_offset,
+                                                    "模型版本": mv,
+                                                    "标签ID": label,
+                                                })
+                                        detail_df = pd.DataFrame(detail_rows)
+                                        pivot_df = detail_df.pivot(
+                                            index="帧号", columns="模型版本", values="标签ID"
+                                        )
+                                        st.dataframe(pivot_df, use_container_width=True)
+                        else:
+                            st.success("✅ 没有发现超过10帧的连续分歧区间")
+
+                        st.markdown("---")
+                        st.markdown("### 📊 指标横向对比")
+
+                        if comp_results.get("has_ground_truth") and comp_results.get("metrics_comparison"):
+                            metrics_comp = comp_results["metrics_comparison"]
+                            metric_names = [
+                                "frame_accuracy", "edit_score",
+                                "f1_at_10", "f1_at_25", "f1_at_50",
+                            ]
+                            metric_labels = [
+                                "逐帧准确率", "编辑距离分数",
+                                "F1@IoU=0.10", "F1@IoU=0.25", "F1@IoU=0.50",
+                            ]
+
+                            comp_table_data = []
+                            for mn, ml in zip(metric_names, metric_labels):
+                                row = {"指标": ml}
+                                for mv, mv_metrics in metrics_comp.items():
+                                    row[mv] = f"{mv_metrics.get(mn, 0):.2%}"
+                                comp_table_data.append(row)
+                            comp_df = pd.DataFrame(comp_table_data)
+                            st.table(comp_df)
+
+                            st.markdown("#### 🎯 指标对比雷达图")
+                            radar_categories = metric_labels
+                            fig_radar = go.Figure()
+                            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+                            for idx, (mv, mv_metrics) in enumerate(metrics_comp.items()):
+                                values = [mv_metrics.get(mn, 0) for mn in metric_names]
+                                fig_radar.add_trace(go.Scatterpolar(
+                                    r=values,
+                                    theta=radar_categories,
+                                    fill="toself",
+                                    name=mv,
+                                    line=dict(color=colors[idx % len(colors)]),
+                                ))
+                            fig_radar.update_layout(
+                                polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                                showlegend=True,
+                                height=500,
+                                title="模型指标雷达图",
+                            )
+                            st.plotly_chart(fig_radar, use_container_width=True)
+                        else:
+                            st.info("未提供Ground Truth，仅展示模型间一致性指标。如需指标对比，请上传GT文件。")
+                            gt_file_compare = st.file_uploader(
+                                "上传Ground Truth (CSV) 以启用指标对比",
+                                type=["csv"],
+                                key="compare_gt_file",
+                            )
+                            if gt_file_compare is not None:
+                                if st.button("📊 计算GT指标对比", key="eval_compare_btn"):
+                                    try:
+                                        files = {
+                                            "gt_file": (
+                                                gt_file_compare.name,
+                                                gt_file_compare.getvalue(),
+                                                "text/csv",
+                                            )
+                                        }
+                                        eval_resp = api_request(
+                                            "POST",
+                                            f"/compare/{compare_task_id}/evaluate",
+                                            files=files,
+                                        )
+                                        if eval_resp and eval_resp.status_code == 200:
+                                            st.success("✅ GT评估完成!")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ GT评估失败: {eval_resp.text if eval_resp else 'API连接失败'}")
+                                    except Exception as e:
+                                        st.error(f"❌ 评估出错: {str(e)}")
+
+                elif status_data["overall_status"] in ("pending", "running"):
+                    auto_refresh = st.checkbox("自动刷新进度", value=True, key="compare_auto_refresh")
+                    if auto_refresh:
+                        time.sleep(3)
+                        st.rerun()
+            else:
+                st.info("暂无对比任务。请先创建对比任务。")
+        else:
+            st.info("暂无对比任务。请先创建对比任务。")

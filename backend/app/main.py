@@ -39,6 +39,12 @@ async def root():
             "download_features": "GET /videos/{id}/features",
             "delete_video": "DELETE /videos/{id}",
             "model_versions": "GET /models/versions",
+            "compare_create": "POST /compare/create",
+            "compare_status": "GET /compare/{task_id}/status",
+            "compare_results": "GET /compare/{task_id}/results",
+            "compare_heatmap": "GET /compare/{task_id}/heatmap",
+            "compare_evaluate": "POST /compare/{task_id}/evaluate",
+            "compare_frame_labels": "GET /compare/{task_id}/frame-labels",
         },
     }
 

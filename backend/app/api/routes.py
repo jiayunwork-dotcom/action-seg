@@ -23,13 +23,21 @@ from app.api.schemas import (
     SplitSegmentRequest,
     MergeSegmentsRequest,
     UndoResponse,
+    CompareCreateRequest,
+    CompareStatusResponse,
+    CompareSubTaskInfo,
+    CompareResultsResponse,
+    DisagreementInterval,
+    HeatmapDataPoint,
+    HeatmapResponse,
 )
 from app.services.segment_editor import SegmentEditor
 from app.services.export_service import ExportService
+from app.services.comparison_service import ComparisonService
 from app.core.config import settings
 from app.services.video_processor import VideoProcessor
 from app.services.storage_manager import StorageManager
-from app.services.tasks import analyze_video_task
+from app.services.tasks import analyze_video_task, launch_comparison_task
 from app.services.evaluator import Evaluator
 from app.models.model_manager import ModelManager
 from app.core.celery_app import celery_app
@@ -41,6 +49,7 @@ storage = StorageManager()
 model_manager = ModelManager()
 segment_editor = SegmentEditor()
 export_service = ExportService()
+comparison_service = ComparisonService()
 
 
 @router.post("/videos/upload", response_model=VideoUploadResponse)
@@ -521,4 +530,175 @@ async def get_model_versions():
         "versions": model_manager.get_available_versions(),
         "default": "latest",
         "action_classes": model_manager.get_action_classes(),
+    }
+
+
+@router.post("/compare/create")
+async def create_comparison(request: CompareCreateRequest):
+    try:
+        task = comparison_service.create_comparison(
+            request.video_id, request.model_versions
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    launch_comparison_task.delay(
+        task["compare_task_id"], request.video_id, request.model_versions
+    )
+
+    return {
+        "compare_task_id": task["compare_task_id"],
+        "video_id": task["video_id"],
+        "model_versions": task["model_versions"],
+        "status": task["overall_status"],
+    }
+
+
+@router.get("/compare/{task_id}/status", response_model=CompareStatusResponse)
+async def get_comparison_status(task_id: str):
+    status = comparison_service.get_comparison_status(task_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Comparison task not found")
+
+    sub_tasks = []
+    for mv, sub in status["sub_tasks"].items():
+        sub_tasks.append(CompareSubTaskInfo(
+            model_version=mv,
+            task_id=sub.get("task_id", ""),
+            status=sub["status"],
+            progress=sub["progress"],
+            error=sub.get("error"),
+        ))
+
+    return CompareStatusResponse(
+        compare_task_id=status["compare_task_id"],
+        video_id=status["video_id"],
+        model_versions=status["model_versions"],
+        overall_status=status["overall_status"],
+        overall_progress=status["overall_progress"],
+        sub_tasks=sub_tasks,
+        failed_models=status.get("failed_models", []),
+        error_details=status.get("error_details", {}),
+    )
+
+
+@router.get("/compare/{task_id}/results")
+async def get_comparison_results(task_id: str):
+    results = comparison_service.compute_comparison_results(task_id)
+    if results is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Comparison results not available. Task may not be completed yet.",
+        )
+
+    disagreement_intervals = {}
+    for pair_key, intervals in results["disagreement_intervals"].items():
+        disagreement_intervals[pair_key] = [
+            DisagreementInterval(**iv) for iv in intervals
+        ]
+
+    return CompareResultsResponse(
+        compare_task_id=results["compare_task_id"],
+        video_id=results["video_id"],
+        model_versions=results["model_versions"],
+        difference_matrix=results["difference_matrix"],
+        agreement_rates=results["agreement_rates"],
+        disagreement_intervals=disagreement_intervals,
+        metrics_comparison=results.get("metrics_comparison"),
+        has_ground_truth=results.get("has_ground_truth", False),
+        total_frames=results["total_frames"],
+        computed_at=results["computed_at"],
+    )
+
+
+@router.get("/compare/{task_id}/heatmap")
+async def get_comparison_heatmap(task_id: str):
+    heatmap = comparison_service.compute_heatmap_data(task_id)
+    if heatmap is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Heatmap data not available. Task may not be completed yet.",
+        )
+
+    heatmap_data = {}
+    for pair_key, points in heatmap["heatmap_data"].items():
+        heatmap_data[pair_key] = [HeatmapDataPoint(**p) for p in points]
+
+    return HeatmapResponse(
+        compare_task_id=heatmap["compare_task_id"],
+        video_id=heatmap["video_id"],
+        model_pairs=heatmap["model_pairs"],
+        is_aggregated=heatmap["is_aggregated"],
+        window_size=heatmap.get("window_size"),
+        heatmap_data=heatmap_data,
+    )
+
+
+@router.post("/compare/{task_id}/evaluate")
+async def evaluate_comparison(task_id: str, gt_file: UploadFile = File(...)):
+    status = comparison_service.get_comparison_status(task_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Comparison task not found")
+
+    if status["overall_status"] not in ("completed", "partial"):
+        raise HTTPException(
+            status_code=400,
+            detail="Comparison task is not completed yet",
+        )
+
+    gt_content = await gt_file.read()
+    gt_text = gt_content.decode("utf-8")
+
+    results = comparison_service.compute_comparison_results_with_gt(
+        task_id, gt_text
+    )
+    if results is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to compute comparison results with Ground Truth",
+        )
+
+    disagreement_intervals = {}
+    for pair_key, intervals in results["disagreement_intervals"].items():
+        disagreement_intervals[pair_key] = [
+            DisagreementInterval(**iv) for iv in intervals
+        ]
+
+    return CompareResultsResponse(
+        compare_task_id=results["compare_task_id"],
+        video_id=results["video_id"],
+        model_versions=results["model_versions"],
+        difference_matrix=results["difference_matrix"],
+        agreement_rates=results["agreement_rates"],
+        disagreement_intervals=disagreement_intervals,
+        metrics_comparison=results.get("metrics_comparison"),
+        has_ground_truth=True,
+        total_frames=results["total_frames"],
+        computed_at=results["computed_at"],
+    )
+
+
+@router.get("/compare/{task_id}/frame-labels")
+async def get_frame_labels(
+    task_id: str,
+    start_frame: int = Query(...),
+    end_frame: int = Query(...),
+    model_versions: str = Query(...),
+):
+    status = comparison_service.get_comparison_status(task_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Comparison task not found")
+
+    mv_list = [v.strip() for v in model_versions.split(",")]
+    labels = comparison_service.get_frame_labels_for_interval(
+        task_id, mv_list, start_frame, end_frame
+    )
+    if labels is None:
+        raise HTTPException(status_code=404, detail="Frame labels not available")
+
+    return {
+        "compare_task_id": task_id,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "frame_labels": labels,
     }

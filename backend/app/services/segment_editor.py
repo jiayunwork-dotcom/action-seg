@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import deque
 
 from app.services.storage_manager import StorageManager
+from app.services.comparison_service import ComparisonService
 
 
 class SegmentEditor:
@@ -17,6 +18,10 @@ class SegmentEditor:
 
     def __init__(self):
         self.storage = StorageManager()
+        self._comparison_service = ComparisonService()
+
+    def _invalidate_compare_cache(self, video_id: str, model_version: str):
+        self._comparison_service.invalidate_cache(video_id, model_version)
 
     def _get_undo_stack(self, video_id: str) -> deque:
         if video_id not in self._undo_stacks:
@@ -167,6 +172,7 @@ class SegmentEditor:
         )
 
         self.storage.save_results(video_id, model_version, results)
+        self._invalidate_compare_cache(video_id, model_version)
         return results
 
     def split_segment(
@@ -230,6 +236,7 @@ class SegmentEditor:
         )
 
         self.storage.save_results(video_id, model_version, results)
+        self._invalidate_compare_cache(video_id, model_version)
         return results
 
     def merge_segments(
@@ -307,6 +314,7 @@ class SegmentEditor:
         )
 
         self.storage.save_results(video_id, model_version, results)
+        self._invalidate_compare_cache(video_id, model_version)
         return results
 
     def undo(self, video_id: str, model_version: str) -> Optional[Dict]:
@@ -325,4 +333,5 @@ class SegmentEditor:
         results["frame_predictions"] = state["frame_predictions"]
 
         self.storage.save_results(video_id, model_version, results)
+        self._invalidate_compare_cache(video_id, model_version)
         return results

@@ -122,3 +122,65 @@ class UndoResponse(BaseModel):
     message: str
     can_undo: bool
     segments_count: int
+
+
+class CompareCreateRequest(BaseModel):
+    video_id: str
+    model_versions: List[str] = Field(..., min_length=2, max_length=4)
+
+
+class CompareSubTaskInfo(BaseModel):
+    model_version: str
+    task_id: str
+    status: str
+    progress: int
+    error: Optional[str] = None
+
+
+class CompareStatusResponse(BaseModel):
+    compare_task_id: str
+    video_id: str
+    model_versions: List[str]
+    overall_status: str
+    overall_progress: int
+    sub_tasks: List[CompareSubTaskInfo]
+    failed_models: List[str] = []
+    error_details: Dict[str, str] = {}
+
+
+class DisagreementInterval(BaseModel):
+    start_frame: int
+    end_frame: int
+    start_time: float
+    end_time: float
+    length_frames: int
+
+
+class CompareResultsResponse(BaseModel):
+    compare_task_id: str
+    video_id: str
+    model_versions: List[str]
+    difference_matrix: List[List[int]]
+    agreement_rates: Dict[str, float]
+    disagreement_intervals: Dict[str, List[DisagreementInterval]]
+    metrics_comparison: Optional[Dict[str, Dict[str, float]]] = None
+    has_ground_truth: bool = False
+    total_frames: int
+    computed_at: str
+
+
+class HeatmapDataPoint(BaseModel):
+    frame_start: int
+    frame_end: int
+    time_start: float
+    time_end: float
+    disagreement_rate: float
+
+
+class HeatmapResponse(BaseModel):
+    compare_task_id: str
+    video_id: str
+    model_pairs: List[str]
+    is_aggregated: bool
+    window_size: Optional[int] = None
+    heatmap_data: Dict[str, List[HeatmapDataPoint]]
