@@ -1,9 +1,10 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from typing import Optional
 from pathlib import Path
 import httpx
 import os
+from io import BytesIO
 
 from app.api.schemas import (
     VideoUploadResponse,
@@ -18,7 +19,13 @@ from app.api.schemas import (
     DeleteResponse,
     CleanupResponse,
     URLUploadRequest,
+    SegmentUpdateRequest,
+    SplitSegmentRequest,
+    MergeSegmentsRequest,
+    UndoResponse,
 )
+from app.services.segment_editor import SegmentEditor
+from app.services.export_service import ExportService
 from app.core.config import settings
 from app.services.video_processor import VideoProcessor
 from app.services.storage_manager import StorageManager
@@ -32,6 +39,8 @@ router = APIRouter(prefix="", tags=["videos"])
 video_processor = VideoProcessor()
 storage = StorageManager()
 model_manager = ModelManager()
+segment_editor = SegmentEditor()
+export_service = ExportService()
 
 
 @router.post("/videos/upload", response_model=VideoUploadResponse)
@@ -309,8 +318,172 @@ async def download_features(
     )
 
 
+@router.put("/videos/{video_id}/segments/{seg_index}", response_model=AnalysisResultsResponse)
+async def update_segment(
+    video_id: str,
+    seg_index: int,
+    request: SegmentUpdateRequest,
+    model_version: str = Query("latest"),
+):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    try:
+        results = segment_editor.update_segment(
+            video_id,
+            model_version,
+            seg_index,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            action_id=request.action_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return AnalysisResultsResponse(
+        video_id=results["video_id"],
+        model_version=results["model_version"],
+        video_info=results["video_info"],
+        segments=results["segments"],
+        action_classes=results["action_classes"],
+    )
+
+
+@router.post("/videos/{video_id}/segments/{seg_index}/split", response_model=AnalysisResultsResponse)
+async def split_segment(
+    video_id: str,
+    seg_index: int,
+    request: SplitSegmentRequest,
+    model_version: str = Query("latest"),
+):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    try:
+        results = segment_editor.split_segment(
+            video_id,
+            model_version,
+            seg_index,
+            request.split_time,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return AnalysisResultsResponse(
+        video_id=results["video_id"],
+        model_version=results["model_version"],
+        video_info=results["video_info"],
+        segments=results["segments"],
+        action_classes=results["action_classes"],
+    )
+
+
+@router.post("/videos/{video_id}/segments/merge", response_model=AnalysisResultsResponse)
+async def merge_segments(
+    video_id: str,
+    request: MergeSegmentsRequest,
+    model_version: str = Query("latest"),
+):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    try:
+        results = segment_editor.merge_segments(
+            video_id,
+            model_version,
+            request.segment_index_1,
+            request.segment_index_2,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return AnalysisResultsResponse(
+        video_id=results["video_id"],
+        model_version=results["model_version"],
+        video_info=results["video_info"],
+        segments=results["segments"],
+        action_classes=results["action_classes"],
+    )
+
+
+@router.post("/videos/{video_id}/segments/undo", response_model=UndoResponse)
+async def undo_segment_edit(
+    video_id: str,
+    model_version: str = Query("latest"),
+):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    results = segment_editor.undo(video_id, model_version)
+    if results is None:
+        return UndoResponse(
+            success=False,
+            message="No undo history available",
+            can_undo=False,
+            segments_count=0,
+        )
+
+    return UndoResponse(
+        success=True,
+        message="Undo successful",
+        can_undo=segment_editor.can_undo(video_id),
+        segments_count=len(results["segments"]),
+    )
+
+
+@router.get("/videos/{video_id}/segments/can-undo")
+async def can_undo(video_id: str):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return {
+        "can_undo": segment_editor.can_undo(video_id),
+    }
+
+
+@router.get("/videos/{video_id}/export/{format}")
+async def export_segments(
+    video_id: str,
+    format: str,
+    model_version: str = Query("latest"),
+):
+    if not storage.video_exists(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    format_lower = format.lower()
+    try:
+        if format_lower == "json":
+            filename, media_type, content = export_service.export_json(
+                video_id, model_version
+            )
+        elif format_lower == "srt":
+            filename, media_type, content = export_service.export_srt(
+                video_id, model_version
+            )
+        elif format_lower == "csv":
+            filename, media_type, content = export_service.export_csv(
+                video_id, model_version
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported format: {format}. Use json, srt, or csv.",
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 @router.delete("/videos/{video_id}", response_model=DeleteResponse)
 async def delete_video(video_id: str):
+    segment_editor.clear_undo_stack(video_id)
     deleted = storage.delete_video(video_id)
     return DeleteResponse(
         video_id=video_id,

@@ -100,3 +100,25 @@ class CleanupResponse(BaseModel):
 
 class URLUploadRequest(BaseModel):
     url: str = Field(..., description="视频URL地址")
+
+
+class SegmentUpdateRequest(BaseModel):
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    action_id: Optional[int] = None
+
+
+class SplitSegmentRequest(BaseModel):
+    split_time: float = Field(..., description="拆分时间点（秒）")
+
+
+class MergeSegmentsRequest(BaseModel):
+    segment_index_1: int = Field(..., description="第一个片段索引")
+    segment_index_2: int = Field(..., description="第二个片段索引")
+
+
+class UndoResponse(BaseModel):
+    success: bool
+    message: str
+    can_undo: bool
+    segments_count: int

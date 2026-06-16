@@ -25,6 +25,140 @@ def api_request(method, endpoint, **kwargs):
         return None
 
 
+def load_results(video_id, model_version="latest"):
+    results_resp = api_request(
+        "GET", f"/videos/{video_id}/results", params={"model_version": model_version}
+    )
+    if results_resp and results_resp.status_code == 200:
+        return results_resp.json()
+    return None
+
+
+def load_timeline(video_id, model_version="latest"):
+    timeline_resp = api_request(
+        "GET", f"/videos/{video_id}/results/timeline", params={"model_version": model_version}
+    )
+    if timeline_resp and timeline_resp.status_code == 200:
+        return timeline_resp.json()
+    return None
+
+
+def update_segment(video_id, seg_index, start_time=None, end_time=None, action_id=None, model_version="latest"):
+    data = {}
+    if start_time is not None:
+        data["start_time"] = start_time
+    if end_time is not None:
+        data["end_time"] = end_time
+    if action_id is not None:
+        data["action_id"] = action_id
+    resp = api_request(
+        "PUT",
+        f"/videos/{video_id}/segments/{seg_index}",
+        json=data,
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+
+def split_segment(video_id, seg_index, split_time, model_version="latest"):
+    resp = api_request(
+        "POST",
+        f"/videos/{video_id}/segments/{seg_index}/split",
+        json={"split_time": split_time},
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+
+def merge_segments(video_id, idx1, idx2, model_version="latest"):
+    resp = api_request(
+        "POST",
+        f"/videos/{video_id}/segments/merge",
+        json={"segment_index_1": idx1, "segment_index_2": idx2},
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+
+def undo_edit(video_id, model_version="latest"):
+    resp = api_request(
+        "POST",
+        f"/videos/{video_id}/segments/undo",
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+
+def can_undo(video_id, model_version="latest"):
+    resp = api_request(
+        "GET",
+        f"/videos/{video_id}/segments/can-undo",
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        return resp.json().get("can_undo", False)
+    return False
+
+
+def export_file(video_id, format_type, model_version="latest"):
+    resp = api_request(
+        "GET",
+        f"/videos/{video_id}/export/{format_type}",
+        params={"model_version": model_version},
+    )
+    if resp and resp.status_code == 200:
+        filename = resp.headers.get("Content-Disposition", "").split('filename="')[-1].rstrip('"')
+        return resp.content, filename
+    return None, None
+
+
+def render_timeline(segments, action_classes_results, video_duration):
+    fig_timeline = go.Figure()
+
+    for i, seg in enumerate(segments):
+        seg_duration = seg["end_time"] - seg["start_time"]
+        if seg_duration <= 0:
+            continue
+        color = next(
+            (c["color"] for c in action_classes_results if c["id"] == seg["action_id"]),
+            "#808080"
+        )
+        fig_timeline.add_trace(go.Bar(
+            x=[seg_duration],
+            y=[f"#{i+1} {seg['action_name']}"],
+            orientation="h",
+            base=[seg["start_time"]],
+            marker_color=color,
+            name=f"{seg['action_name']} ({seg['start_time']:.1f}s-{seg['end_time']:.1f}s)",
+            hovertext=(
+                f"片段 #{i+1}<br>"
+                f"动作: {seg['action_name']}<br>"
+                f"时间: {seg['start_time']:.2f}s - {seg['end_time']:.2f}s<br>"
+                f"置信度: {seg['confidence']:.2%}<br>"
+                f"帧: {seg['start_frame']} - {seg['end_frame']}"
+            ),
+            hoverinfo="text",
+        ))
+
+    fig_timeline.update_layout(
+        barmode="overlay",
+        height=400,
+        xaxis_title="时间 (秒)",
+        xaxis_range=[0, video_duration],
+        yaxis_title="动作片段",
+        showlegend=True,
+    )
+    st.plotly_chart(fig_timeline, use_container_width=True)
+
+
 st.set_page_config(
     page_title="视频动作识别与时序行为分割",
     page_icon="🎬",
@@ -215,27 +349,73 @@ with tab2:
     else:
         video_id = st.session_state["current_video_id"]
         model_version = selected_model if "selected_model" in locals() else "latest"
+        segments = []
+        video_info = {}
+        action_classes_results = []
+        timeline_data = None
+        results_data = None
+        video_duration = 0.0
 
         try:
             with st.spinner("加载分析结果..."):
-                results_resp = api_request(
-                    "GET", f"/videos/{video_id}/results", params={"model_version": model_version}
-                )
+                results_data = load_results(video_id, model_version)
                 timeline_resp = api_request(
                     "GET", f"/videos/{video_id}/results/timeline", params={"model_version": model_version}
                 )
+                if timeline_resp and timeline_resp.status_code == 200:
+                    timeline_data = timeline_resp.json()
 
-            if results_resp is None:
+            if results_data is None:
                 st.error("❌ 无法连接API服务，请检查后端是否运行")
-            elif results_resp.status_code == 404:
+            elif not results_data.get("segments"):
                 st.warning("分析结果尚未就绪，请先完成视频分析")
-            elif results_resp.status_code != 200:
-                st.error(f"❌ 加载结果失败: {results_resp.text}")
             else:
-                results_data = results_resp.json()
                 segments = results_data["segments"]
                 video_info = results_data["video_info"]
                 action_classes_results = results_data["action_classes"]
+                video_duration = video_info["duration"]
+
+                st.subheader("⚙️ 编辑工具栏")
+                col_tool1, col_tool2, col_tool3, col_tool4 = st.columns([1, 1, 1, 2])
+
+                with col_tool1:
+                    can_undo_flag = can_undo(video_id, model_version)
+                    if st.button("↩️ 撤销", disabled=not can_undo_flag, type="secondary"):
+                        undo_result = undo_edit(video_id, model_version)
+                        if undo_result and undo_result.get("success"):
+                            st.success("✅ 撤销成功")
+                            st.rerun()
+                        else:
+                            st.warning("无法撤销")
+
+                with col_tool2:
+                    edit_mode = st.toggle("✏️ 编辑模式", value=False)
+
+                with col_tool3:
+                    with st.expander("📤 导出"):
+                        export_format = st.radio(
+                            "选择导出格式",
+                            ["JSON", "SRT字幕", "CSV表格"],
+                            horizontal=True,
+                        )
+                        format_map = {"JSON": "json", "SRT字幕": "srt", "CSV表格": "csv"}
+                        if st.button("导出文件", type="primary", key="export_btn"):
+                            fmt = format_map[export_format]
+                            content, filename = export_file(video_id, fmt, model_version)
+                            if content:
+                                st.success("✅ 导出成功，请点击下方按钮下载")
+                                st.download_button(
+                                    label="💾 下载文件",
+                                    data=content,
+                                    file_name=filename,
+                                    mime="application/octet-stream",
+                                    key="download_export",
+                                )
+                            else:
+                                st.error("导出失败")
+
+                with col_tool4:
+                    st.info(f"共 {len(segments)} 个动作片段 | 视频时长: {video_duration:.2f}s")
 
                 col_vid, col_info = st.columns([3, 1])
 
@@ -252,42 +432,9 @@ with tab2:
                     else:
                         st.info("视频播放器: 请在左侧上传视频以播放")
 
-                    if segments and timeline_resp and timeline_resp.status_code == 200:
-                        timeline_data = timeline_resp.json()["timeline"]
+                    if segments and timeline_data:
                         st.subheader("⏱️ 动作时间轴")
-                        fig_timeline = go.Figure()
-
-                        for seg in segments:
-                            seg_duration = seg["end_time"] - seg["start_time"]
-                            if seg_duration <= 0:
-                                continue
-                            fig_timeline.add_trace(go.Bar(
-                                x=[seg_duration],
-                                y=[seg["action_name"]],
-                                orientation="h",
-                                base=[seg["start_time"]],
-                                marker_color=next(
-                                    (c["color"] for c in action_classes_results if c["id"] == seg["action_id"]),
-                                    "#808080"
-                                ),
-                                name=f"{seg['action_name']} ({seg['start_time']:.1f}s-{seg['end_time']:.1f}s)",
-                                hovertext=(
-                                    f"动作: {seg['action_name']}<br>"
-                                    f"时间: {seg['start_time']:.2f}s - {seg['end_time']:.2f}s<br>"
-                                    f"置信度: {seg['confidence']:.2%}<br>"
-                                    f"帧: {seg['start_frame']} - {seg['end_frame']}"
-                                ),
-                                hoverinfo="text",
-                            ))
-
-                        fig_timeline.update_layout(
-                            barmode="overlay",
-                            height=400,
-                            xaxis_title="时间 (秒)",
-                            yaxis_title="动作类别",
-                            showlegend=True,
-                        )
-                        st.plotly_chart(fig_timeline, use_container_width=True)
+                        render_timeline(segments, action_classes_results, video_duration)
 
                 with col_info:
                     st.subheader("📋 视频信息")
@@ -323,23 +470,134 @@ with tab2:
                 st.markdown("---")
                 st.subheader("🎯 动作片段列表")
 
-                if segments:
-                    seg_display_df = pd.DataFrame(segments)
-                    seg_display_df = seg_display_df[[
-                        "action_name", "start_time", "end_time",
-                        "start_frame", "end_frame", "confidence"
-                    ]]
-                    seg_display_df.columns = [
-                        "动作类别", "开始时间(s)", "结束时间(s)",
-                        "开始帧", "结束帧", "置信度"
-                    ]
-                    seg_display_df["置信度"] = seg_display_df["置信度"].apply(lambda x: f"{x:.2%}")
+                if edit_mode:
+                    st.info("💡 编辑模式：展开每个片段可编辑属性、拆分；上方可合并相邻片段")
 
-                    st.dataframe(
-                        seg_display_df,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    merge_col1, merge_col2, merge_col3 = st.columns([1, 1, 1])
+                    with merge_col1:
+                        max_idx = max(0, len(segments) - 1)
+                        merge_idx1 = st.number_input(
+                            "合并 - 片段1索引",
+                            min_value=0,
+                            max_value=max_idx,
+                            value=0,
+                            step=1,
+                            key="merge_idx1",
+                        )
+                    with merge_col2:
+                        merge_idx2 = st.number_input(
+                            "合并 - 片段2索引",
+                            min_value=0,
+                            max_value=max_idx,
+                            value=min(1, max_idx),
+                            step=1,
+                            key="merge_idx2",
+                        )
+                    with merge_col3:
+                        if st.button("🔗 合并选中片段", type="primary", key="merge_btn"):
+                            if abs(merge_idx1 - merge_idx2) == 1:
+                                result = merge_segments(video_id, merge_idx1, merge_idx2, model_version)
+                                if result:
+                                    st.success("✅ 合并成功")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ 合并失败")
+                            else:
+                                st.error("只能合并相邻的两个片段")
+
+                    for i, seg in enumerate(segments):
+                        with st.expander(f"📌 片段 #{i+1}: {seg['action_name']} ({seg['start_time']:.2f}s - {seg['end_time']:.2f}s)"):
+                            col_e1, col_e2 = st.columns([2, 1])
+
+                            with col_e1:
+                                new_start = st.number_input(
+                                    "起始时间 (秒)",
+                                    min_value=0.0,
+                                    max_value=float(video_duration),
+                                    value=float(seg["start_time"]),
+                                    step=0.1,
+                                    key=f"start_{i}",
+                                )
+                                new_end = st.number_input(
+                                    "结束时间 (秒)",
+                                    min_value=0.0,
+                                    max_value=float(video_duration),
+                                    value=float(seg["end_time"]),
+                                    step=0.1,
+                                    key=f"end_{i}",
+                                )
+                                action_names = [c["name"] for c in action_classes_results]
+                                action_ids = [c["id"] for c in action_classes_results]
+                                current_name_idx = action_ids.index(seg["action_id"]) if seg["action_id"] in action_ids else 0
+                                new_action_name = st.selectbox(
+                                    "动作类别",
+                                    action_names,
+                                    index=current_name_idx,
+                                    key=f"action_{i}",
+                                )
+                                new_action_id = action_ids[action_names.index(new_action_name)]
+
+                            with col_e2:
+                                st.metric("持续时间", f"{seg['end_time'] - seg['start_time']:.2f}s")
+                                st.metric("置信度", f"{seg['confidence']:.2%}")
+
+                                changed = (
+                                    abs(new_start - seg["start_time"]) > 0.001
+                                    or abs(new_end - seg["end_time"]) > 0.001
+                                    or new_action_id != seg["action_id"]
+                                )
+
+                                if st.button("💾 保存修改", key=f"save_{i}", disabled=not changed, type="primary"):
+                                    result = update_segment(
+                                        video_id, i,
+                                        start_time=new_start,
+                                        end_time=new_end,
+                                        action_id=new_action_id,
+                                        model_version=model_version,
+                                    )
+                                    if result:
+                                        st.success("✅ 修改已保存")
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ 保存失败")
+
+                                st.divider()
+
+                                split_time_val = st.number_input(
+                                    "拆分时间点 (秒)",
+                                    min_value=float(seg["start_time"]),
+                                    max_value=float(seg["end_time"]),
+                                    value=float((seg["start_time"] + seg["end_time"]) / 2),
+                                    step=0.1,
+                                    key=f"split_time_{i}",
+                                )
+                                if st.button("✂️ 拆分段", key=f"split_{i}"):
+                                    result = split_segment(video_id, i, split_time_val, model_version)
+                                    if result:
+                                        st.success("✅ 拆分成功")
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ 拆分失败")
+
+                else:
+                    if segments:
+                        seg_display_df = pd.DataFrame(segments)
+                        seg_display_df = seg_display_df[[
+                            "action_name", "start_time", "end_time",
+                            "start_frame", "end_frame", "confidence"
+                        ]]
+                        seg_display_df.columns = [
+                            "动作类别", "开始时间(s)", "结束时间(s)",
+                            "开始帧", "结束帧", "置信度"
+                        ]
+                        seg_display_df["置信度"] = seg_display_df["置信度"].apply(lambda x: f"{x:.2%}")
+                        seg_display_df.insert(0, "序号", range(1, len(seg_display_df) + 1))
+
+                        st.dataframe(
+                            seg_display_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
                 if results_data.get("frame_predictions"):
                     st.subheader("📈 置信度时序折线图")

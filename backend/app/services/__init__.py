@@ -3,6 +3,8 @@ from app.services.post_processor import PostProcessor, ActionSegment
 from app.services.evaluator import Evaluator, EvaluationMetrics
 from app.services.storage_manager import StorageManager
 from app.services.analysis_pipeline import AnalysisPipeline
+from app.services.segment_editor import SegmentEditor
+from app.services.export_service import ExportService
 
 __all__ = [
     "VideoProcessor",
@@ -13,4 +15,6 @@ __all__ = [
     "EvaluationMetrics",
     "StorageManager",
     "AnalysisPipeline",
+    "SegmentEditor",
+    "ExportService",
 ]
