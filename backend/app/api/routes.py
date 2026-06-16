@@ -542,9 +542,14 @@ async def create_comparison(request: CompareCreateRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    launch_comparison_task.delay(
-        task["compare_task_id"], request.video_id, request.model_versions
-    )
+    pending_models = [
+        mv for mv, sub in task["sub_tasks"].items()
+        if sub["status"] == "pending"
+    ]
+    if pending_models:
+        launch_comparison_task.delay(
+            task["compare_task_id"], request.video_id, request.model_versions
+        )
 
     return {
         "compare_task_id": task["compare_task_id"],
@@ -622,7 +627,16 @@ async def get_comparison_heatmap(task_id: str):
 
     heatmap_data = {}
     for pair_key, points in heatmap["heatmap_data"].items():
-        heatmap_data[pair_key] = [HeatmapDataPoint(**p) for p in points]
+        converted = []
+        for p in points:
+            converted.append(HeatmapDataPoint(
+                frame_start=p["s"],
+                frame_end=p["e"],
+                time_start=p["ts"],
+                time_end=p["te"],
+                disagreement_rate=p["r"],
+            ))
+        heatmap_data[pair_key] = converted
 
     return HeatmapResponse(
         compare_task_id=heatmap["compare_task_id"],
